@@ -1,0 +1,201 @@
+---
+title: "BIOSTAT 885 Project"
+author: "Xiangeng Fang"
+date: "2024-12-06"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("F:/OneDrive - Umich/Coursework/Year3 Fall/BIOSTAT 885")
+library(tidyverse)
+library(mgcv)
+library(splines)
+```
+
+# Data Preprocessing
+
+```{r}
+heart_data <- read.table("Heart_data.txt", header = TRUE, skip = 18)
+
+heart_data <- heart_data %>% 
+  mutate(age_at_tx = (as.Date(tx.date, format = "%Y-%m-%d")-as.Date(birth.dt, format = "%Y-%m-%d"))/365.25,
+         age_at_acceptance = (as.Date(accept.dt, format = "%Y-%m-%d")-as.Date(birth.dt, format = "%Y-%m-%d"))/365.25 #age_interst = ifelse(is.na(age_at_tx),age_at_acceptance,age_at_tx)
+         ) %>% 
+  rename(death = fustat) %>% 
+  mutate(survival = 1-death)
+
+heart_data <- heart_data %>% filter(age >= 18)
+```
+
+# EDA 
+
+```{r}
+plot_data <- data.frame(
+  transplant = heart_data$transplant,
+  death = heart_data$death,
+  age = heart_data$age
+)
+
+plot_data2 <- plot_data %>%
+  count(transplant, death) %>%
+  group_by(transplant) %>%
+  mutate(percentage = n / sum(n) * 100) %>%
+  ungroup()
+
+age_ranges <- c(18, 35, 45, 55, 65)
+age_ranges_rounded <- age_ranges
+
+plot_data <- plot_data %>%
+  mutate(age_group = cut(age, 
+                         breaks = age_ranges,
+                         labels = paste0("[", age_ranges_rounded[-length(age_ranges_rounded)], 
+                                         "-", age_ranges_rounded[-1], "]"),
+                         include.lowest = TRUE))
+
+# Create a combined outcome variable for transplant and survival
+plot_data <- plot_data %>%
+  mutate(outcome = case_when(
+    transplant == 1 & death == 0 ~ "Transplant & Survive",
+    transplant == 1 & death == 1 ~ "Transplant & Die",
+    transplant == 0 & death == 0 ~ "No Transplant & Survive",
+    transplant == 0 & death == 1 ~ "No Transplant & Die"
+  ))
+
+# Summarize data for visualization
+plot_data <- plot_data %>%
+  count(age_group, outcome) %>%
+  group_by(age_group) %>%
+  mutate(percentage = n / sum(n) * 100) %>%
+  ungroup()
+
+custom_colors <- c(
+  "Transplant & Survive" = "#1f77b4",  # Blue
+  "Transplant & Die" = "#ff7f0e",      # Orange
+  "No Transplant & Survive" = "#b3e381", # Green
+  "No Transplant & Die" = "#de9aea"
+)
+
+ggplot(plot_data, aes(x = age_group, y = percentage, fill = outcome)) +
+  geom_bar(stat = "identity", position = "stack", width = 0.7) +
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), 
+            position = position_stack(vjust = 0.5), size = 10) +
+  scale_fill_manual(values = custom_colors) +
+  labs(x = "Age Group", y = "Percentage", fill = "Outcome") +
+  theme_minimal() +
+  guides(fill = guide_legend(nrow = 2))+
+  theme(legend.position = "top",
+        text = element_text(size = 24),
+        panel.grid.major = element_line(color = "gray"),
+        panel.grid.minor = element_line(color = "gray"),
+        legend.title = element_blank())
+
+ggplot(plot_data2, aes(x = factor(transplant, labels = c("No Transplant", "Transplant")),
+                      y = percentage, fill = factor(death, labels = c("Survived", "Died")))) +
+  geom_bar(stat = "identity", width = 0.6) +
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), 
+            position = position_stack(vjust = 0.5), size = 10) +
+  labs(x = "Transplant Status", y = "Percentage", fill = "Outcome") +
+  scale_fill_manual(values = c("#84c4ed","#f293c4")) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme(legend.position = "top",
+        text = element_text(size = 24),
+        panel.grid.major = element_line(color = "gray"),
+        panel.grid.minor = element_line(color = "gray"),
+        legend.title = element_blank())
+```
+
+
+# Basic Logistic Regression Model
+
+```{r}
+heart_data$transplant <- ifelse(heart_data$transplant == 1, "Transplant", "No Transplant")
+heart_data$transplant <- factor(heart_data$transplant, levels = c("No Transplant", "Transplant"))
+heart_data$transplant <- relevel(heart_data$transplant, ref = "No Transplant")
+basic_logistic_model <- glm(death ~ transplant, family = binomial(), data = heart_data)
+summary(basic_logistic_model)
+
+summary(glm(death ~ age+transplant, family = binomial(), data = heart_data))
+
+logistic_model_with_interaction <- glm(survival ~ transplant + age + transplant:age, family = binomial(), data = heart_data)
+
+summary(logistic_model_with_interaction)
+
+logistic_model_with_interaction <- glm(death ~ transplant:age, family = binomial(), data = heart_data)
+
+summary(logistic_model_with_interaction)
+```
+
+# using smooth splines for age
+
+```{r}
+logistic_gam_model <- gam(survival ~ transplant + s(age, by = transplant), family = binomial(), data = heart_data)
+
+summary(logistic_gam_model)
+
+plot(logistic_gam_model, select = 1, shade = TRUE, main = "s(age) for non-transplant group", xlab = "Age", ylab = "Partial effect", cex = 5)
+
+plot(logistic_gam_model, select = 2, shade = TRUE, main = "s(age) for transplant group", xlab = "Age", ylab = "Partial effect", cex = 5)
+
+new_data <- data.frame(age = rep(seq(min(heart_data$age), max(heart_data$age), length.out = 100), each = 2),
+                       transplant = factor(c("No Transplant", "Transplant")))
+preds <- predict(logistic_gam_model, newdata = new_data, type = "link", se.fit = T)
+
+ggplot() + 
+  labs(x = "Age", y = "Survival Probability") +
+  geom_line(data = new_data, 
+            aes(x = age, y = plogis(preds$fit), color = transplant, linetype = transplant), 
+            linewidth = 1.5) +
+  geom_ribbon(data = new_data, 
+              aes(x = age, 
+                  ymin = plogis(preds$fit - 1.96 * preds$se.fit), 
+                  ymax = plogis(preds$fit + 1.96 * preds$se.fit), fill = transplant), 
+              alpha = 0.3) +
+  theme_minimal() +
+  scale_color_manual(values = c("No Transplant" = "blue", "Transplant" = "red")) +
+  scale_linetype_manual(values = c("No Transplant" = "solid", "Transplant" = "dashed")) +
+  scale_fill_manual(values = c("No Transplant" = "#2183c1", "Transplant" = "#d04b30")) +
+  theme(
+    legend.position = "top",                # Legend at the top
+    legend.key.size = unit(2, "cm"),        # Adjust legend key size
+    legend.title = element_blank(),
+    legend.text = element_text(size = 24),   # Adjust legend text size
+    text = element_text(size = 24),         # Adjust overall text size
+    panel.grid.major = element_line(color = "gray80"), # Soft gridlines
+    panel.grid.minor = element_line(color = "gray90")
+  )
+
+
+# interaction_effects <- preds[seq(2, length(preds), by = 2)] - preds[seq(1, length(preds), by = 2)]
+# diff_data <- data.frame(age = new_data$age[seq(1, length(new_data$age), by = 2)], interaction_effects = interaction_effects)
+# ggplot(diff_data, aes(x = age, y = interaction_effects)) +
+#   geom_line(linewidth = 2, color = "red", linetype = "dashed") + labs(x = "Age", y = "Probability associated the interaction effect") +
+#   theme_minimal()+
+#   theme(text = element_text(size = 24),
+#         panel.grid.major = element_line(color = "gray"),
+#         panel.grid.minor = element_line(color = "gray"))
+
+preds_lp <- predict(logistic_gam_model, newdata = new_data, type = "link")
+
+ggplot() +
+  labs(x = "Age", y = "Predicted Log Odds") +
+  geom_line(data = new_data, aes(x = age, y = preds_lp, color = transplant, linetype = transplant), linewidth = 2)+
+  theme_minimal()+
+  scale_color_manual(values = c("No Transplant" = "black", "Transplant" = "red"))+
+  theme(legend.position = "top",
+        legend.key.size = unit(2, "cm"),
+        legend.title = element_blank(),
+        text = element_text(size = 24),
+        panel.grid.major = element_line(color = "gray"),
+        panel.grid.minor = element_line(color = "gray"))
+
+# interaction_effects <- preds_lp[seq(2, length(preds_lp), by = 2)] - preds_lp[seq(1, length(preds_lp), by = 2)]
+# diff_data <- data.frame(age = new_data$age[seq(1, length(new_data$age), by = 2)], interaction_effects = interaction_effects)
+# ggplot(diff_data, aes(x = age, y = interaction_effects)) +
+#   geom_line(linewidth = 2, color = "red", linetype = "dashed") + labs(x = "Age", y = "Linear Predictor from the interaction effect") +
+#   theme_minimal()+
+#   theme(text = element_text(size = 24),
+#         panel.grid.major = element_line(color = "gray"),
+#         panel.grid.minor = element_line(color = "gray"))
+```
